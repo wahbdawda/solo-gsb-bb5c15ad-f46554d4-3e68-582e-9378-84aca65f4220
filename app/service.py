@@ -38,6 +38,10 @@ class OutOfCoverageError(Exception):
         super().__init__(msg)
 
 
+class InvalidWindowError(Exception):
+    """积分窗口下界不小于上界。"""
+
+
 # ---------- 观测 ----------
 
 def create_observation(reference: float, tolerance: float, readings: list[float], ts: float) -> dict:
@@ -342,3 +346,61 @@ def _endpoint_dict(conn: sqlite3.Connection, obs: sqlite3.Row) -> dict:
         "bias": obs["bias"],
         "outliers": [r["value"] for r in outliers],
     }
+
+
+# ---------- 累计漂移量积分 ----------
+
+def drift_integral(frm: float, to: float) -> dict:
+    """对当前分段线性 bias 在窗口 [frm, to] 上做解析积分。
+
+    窗口边界可落在区间内部（按插值裁剪）；段内 bias 过零时按解析交点拆分
+    绝对值面积。返回有符号/绝对值累计量与按时间排序的分段贡献，贡献之和
+    即汇总值（同一循环内累加，无二次求和误差）。
+    """
+    if not frm < to:
+        raise InvalidWindowError(f"from ({frm}) must be less than to ({to})")
+    with closing(connect()) as conn:
+        bounds = conn.execute("SELECT MIN(ts) AS lo, MAX(ts) AS hi FROM observations").fetchone()
+        lo, hi = bounds["lo"], bounds["hi"]
+        if lo is None:
+            raise OutOfCoverageError(frm, None, None)
+        if frm < lo:
+            raise OutOfCoverageError(frm, lo, hi)
+        if to > hi:
+            raise OutOfCoverageError(to, lo, hi)
+        rows = conn.execute(
+            "SELECT * FROM intervals WHERE t_start < ? AND t_end > ? ORDER BY t_start",
+            (to, frm),
+        ).fetchall()
+        contributions = []
+        signed_total = 0.0
+        absolute_total = 0.0
+        for row in rows:
+            a = max(frm, row["t_start"])   # 裁剪到查询窗口
+            b = min(to, row["t_end"])
+            if not a < b:
+                continue                   # 仅在端点相触，面积为零
+            ba = calibration.interpolate(a, row["t_start"], row["bias_start"], row["t_end"], row["bias_end"])
+            bb = calibration.interpolate(b, row["t_start"], row["bias_start"], row["t_end"], row["bias_end"])
+            signed, absolute = calibration.integrate_segment(a, ba, b, bb)
+            signed_total += signed
+            absolute_total += absolute
+            contributions.append({
+                "t_start": a,
+                "t_end": b,
+                "start_iso": epoch_to_iso(a),
+                "end_iso": epoch_to_iso(b),
+                "bias_start": ba,
+                "bias_end": bb,
+                "signed_bias_seconds": signed,
+                "absolute_bias_seconds": absolute,
+            })
+        return {
+            "from": frm,
+            "from_iso": epoch_to_iso(frm),
+            "to": to,
+            "to_iso": epoch_to_iso(to),
+            "signed_bias_seconds": signed_total,
+            "absolute_bias_seconds": absolute_total,
+            "contributions": contributions,
+        }

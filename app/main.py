@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from . import service
 from .calibration import CalibrationError
@@ -11,14 +12,17 @@ from .db import init_db
 from .models import (
     CorrectionIn,
     CorrectionOut,
+    DriftIntegralOut,
     IntervalOut,
     ObservationIn,
     ObservationOut,
     ObservationReviseIn,
     RevisionOut,
+    Timestamp,
 )
 from .service import (
     DuplicateTimestampError,
+    InvalidWindowError,
     ObservationNotFoundError,
     OutOfCoverageError,
     RevisionConflictError,
@@ -115,4 +119,20 @@ def post_correction(payload: CorrectionIn) -> dict:
     try:
         return service.correct(ts=payload.timestamp, reading=payload.reading)
     except OutOfCoverageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/drift-integral", response_model=DriftIntegralOut)
+def get_drift_integral(
+    from_: Annotated[Timestamp, Query(alias="from", description="积分窗口下界：Unix 秒或 ISO 8601")],
+    to: Annotated[Timestamp, Query(description="积分窗口上界：Unix 秒或 ISO 8601")],
+) -> dict:
+    """在观测覆盖范围内对当前分段线性 bias 做精确积分。
+
+    返回有符号/绝对值累计漂移量（偏差·秒）及按插值区间裁剪的分段贡献；
+    窗口边界可落在区间内部，段内 bias 过零时按解析交点拆分绝对值面积。
+    """
+    try:
+        return service.drift_integral(frm=from_, to=to)
+    except (InvalidWindowError, OutOfCoverageError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

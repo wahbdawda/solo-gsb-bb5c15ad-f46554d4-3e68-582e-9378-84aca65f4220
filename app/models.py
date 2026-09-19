@@ -115,3 +115,26 @@ class CorrectionOut(BaseModel):
     corrected: float
     interval: IntervalOut | None = Field(description="所用插值区间；恰落在观测点上时为 null")
     endpoints: list[EndpointOut] = Field(description="区间端点观测及其异常读数明细")
+
+
+class DriftContributionOut(BaseModel):
+    t_start: float = Field(description="裁剪后子段起点（Unix 秒）")
+    t_end: float = Field(description="裁剪后子段终点（Unix 秒）")
+    start_iso: str
+    end_iso: str
+    bias_start: float = Field(description="子段起点处的插值偏差")
+    bias_end: float = Field(description="子段终点处的插值偏差")
+    signed_bias_seconds: float = Field(description="子段有符号面积（偏差·秒）")
+    absolute_bias_seconds: float = Field(description="子段绝对值面积（偏差·秒），段内过零按解析交点拆分")
+
+
+class DriftIntegralOut(BaseModel):
+    from_: float = Field(alias="from", description="积分窗口下界（Unix 秒）")
+    from_iso: str
+    to: float = Field(description="积分窗口上界（Unix 秒）")
+    to_iso: str
+    signed_bias_seconds: float = Field(description="窗口内偏差的有符号积分（偏差·秒）")
+    absolute_bias_seconds: float = Field(description="窗口内偏差绝对值的积分（偏差·秒）")
+    contributions: list[DriftContributionOut] = Field(
+        description="按插值区间裁剪后的分段贡献，按时间排序；各分段面积之和等于汇总值"
+    )

@@ -298,3 +298,98 @@ def test_revisions_history_empty_before_any_revision(two_points):
 
 def test_revisions_history_unknown_id_returns_404(two_points):
     assert two_points.get("/observations/999/revisions").status_code == 404
+
+
+# ---------- 累计漂移量积分 ----------
+
+@pytest.fixture()
+def three_points(client):
+    # bias：1000 → 1.0，2000 → 3.0，3000 → -1.0（第二段在 t=2750 处过零）
+    make_observation(client, 1000.0, 10.0, 0.5, [9.0, 9.1, 8.9, 20.0])
+    make_observation(client, 2000.0, 10.0, 0.5, [7.0, 7.1, 6.9])
+    make_observation(client, 3000.0, 10.0, 0.5, [11.0, 11.1, 10.9])
+    return client
+
+
+def test_drift_integral_full_coverage(three_points):
+    resp = three_points.get("/drift-integral", params={"from": 1000.0, "to": 3000.0})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["from"] == pytest.approx(1000.0)
+    assert body["to"] == pytest.approx(3000.0)
+    # 段1 (1→3)：梯形 2000；段2 (3→-1)：梯形 1000
+    assert body["signed_bias_seconds"] == pytest.approx(3000.0)
+    # 段2 过零（t=2750）：两三角形 1125 + 125 = 1250；段1 不变号 2000
+    assert body["absolute_bias_seconds"] == pytest.approx(3250.0)
+
+    contribs = body["contributions"]
+    assert [(c["t_start"], c["t_end"]) for c in contribs] == [(1000.0, 2000.0), (2000.0, 3000.0)]
+    assert contribs[0]["bias_start"] == pytest.approx(1.0)
+    assert contribs[0]["bias_end"] == pytest.approx(3.0)
+    assert contribs[0]["signed_bias_seconds"] == pytest.approx(2000.0)
+    assert contribs[0]["absolute_bias_seconds"] == pytest.approx(2000.0)
+    assert contribs[1]["signed_bias_seconds"] == pytest.approx(1000.0)
+    assert contribs[1]["absolute_bias_seconds"] == pytest.approx(1250.0)
+    # 分段贡献之和分别等于汇总值
+    assert sum(c["signed_bias_seconds"] for c in contribs) == body["signed_bias_seconds"]
+    assert sum(c["absolute_bias_seconds"] for c in contribs) == body["absolute_bias_seconds"]
+
+
+def test_drift_integral_clips_window_inside_intervals(three_points):
+    # 窗口两端都落在区间内部：[1500, 2500]
+    body = three_points.get("/drift-integral", params={"from": 1500.0, "to": 2500.0}).json()
+    contribs = body["contributions"]
+    assert [(c["t_start"], c["t_end"]) for c in contribs] == [(1500.0, 2000.0), (2000.0, 2500.0)]
+    # 裁剪点偏差按线性插值：bias(1500)=2.0，bias(2500)=1.0
+    assert contribs[0]["bias_start"] == pytest.approx(2.0)
+    assert contribs[1]["bias_end"] == pytest.approx(1.0)
+    assert body["signed_bias_seconds"] == pytest.approx(1250.0 + 1000.0)
+    assert body["absolute_bias_seconds"] == pytest.approx(2250.0)  # 窗口未触及零点
+
+
+def test_drift_integral_splits_absolute_area_at_zero_crossing(three_points):
+    # 窗口 [2500, 3000]：bias 1.0 → -1.0，t=2750 处过零
+    body = three_points.get("/drift-integral", params={"from": 2500.0, "to": 3000.0}).json()
+    assert body["signed_bias_seconds"] == pytest.approx(0.0)          # 两三角形相互抵消
+    assert body["absolute_bias_seconds"] == pytest.approx(125.0 + 125.0)
+    assert len(body["contributions"]) == 1
+    contrib = body["contributions"][0]
+    assert contrib["signed_bias_seconds"] == pytest.approx(0.0)
+    assert contrib["absolute_bias_seconds"] == pytest.approx(250.0)
+
+
+def test_drift_integral_window_at_observation_points(three_points):
+    # 边界恰落在观测点上（含端点）
+    body = three_points.get("/drift-integral", params={"from": 1000.0, "to": 2000.0}).json()
+    assert body["signed_bias_seconds"] == pytest.approx(2000.0)
+    assert [(c["t_start"], c["t_end"]) for c in body["contributions"]] == [(1000.0, 2000.0)]
+
+
+def test_drift_integral_accepts_iso8601_bounds(two_points):
+    resp = two_points.get(
+        "/drift-integral",
+        params={"from": "1970-01-01T00:16:40Z", "to": "1970-01-01T00:33:20Z"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["signed_bias_seconds"] == pytest.approx(2000.0)  # (1+3)/2 × 1000s
+    assert body["absolute_bias_seconds"] == pytest.approx(2000.0)
+
+
+def test_drift_integral_rejects_inverted_or_empty_window(three_points):
+    for params in ({"from": 2000.0, "to": 2000.0}, {"from": 3000.0, "to": 1000.0}):
+        resp = three_points.get("/drift-integral", params=params)
+        assert resp.status_code == 400
+        assert "must be less than" in resp.json()["detail"]
+
+
+def test_drift_integral_out_of_coverage_rejected(three_points):
+    for params in ({"from": 999.0, "to": 2000.0}, {"from": 2000.0, "to": 3001.0}):
+        resp = three_points.get("/drift-integral", params=params)
+        assert resp.status_code == 400
+        assert "outside calibration coverage" in resp.json()["detail"]
+
+
+def test_drift_integral_without_any_observation_rejected(client):
+    resp = client.get("/drift-integral", params={"from": 1.0, "to": 2.0})
+    assert resp.status_code == 400
