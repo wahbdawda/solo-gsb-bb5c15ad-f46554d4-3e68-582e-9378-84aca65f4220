@@ -115,3 +115,32 @@ class CorrectionOut(BaseModel):
     corrected: float
     interval: IntervalOut | None = Field(description="所用插值区间；恰落在观测点上时为 null")
     endpoints: list[EndpointOut] = Field(description="区间端点观测及其异常读数明细")
+
+
+class DriftContributionOut(BaseModel):
+    """单个插值区间裁剪到查询窗口后的解析积分贡献（按时间排序）。"""
+
+    t_start: float = Field(description="裁剪后起点：max(查询 from, 区间起点)")
+    t_end: float = Field(description="裁剪后终点：min(查询 to, 区间终点)")
+    start_iso: str
+    end_iso: str
+    bias_start: float = Field(description="裁剪后起点处的（插值）偏差")
+    bias_end: float = Field(description="裁剪后终点处的（插值）偏差")
+    signed_bias_seconds: float = Field(description="该贡献的有号偏差面积（bias·秒）")
+    absolute_bias_seconds: float = Field(description="|bias| 的面积；段内过零时按解析交点拆分")
+    zero_crossing: float | None = Field(
+        description="偏差在该段内部穿越 0 的解析交点时点；无内部过零为 null"
+    )
+    zero_crossing_iso: str | None = None
+
+
+class DriftIntegralOut(BaseModel):
+    start: float = Field(serialization_alias="from", description="积分起点（Unix 秒）")
+    end: float = Field(serialization_alias="to", description="积分终点（Unix 秒）")
+    start_iso: str
+    end_iso: str
+    signed_bias_seconds: float = Field(description="全部贡献有号面积之和（可正可负）")
+    absolute_bias_seconds: float = Field(description="全部贡献绝对面积之和，恒非负")
+    contributions: list[DriftContributionOut] = Field(
+        description="按时间排序的逐段贡献；有号/绝对面积分别累加等于汇总值"
+    )

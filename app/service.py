@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import time
 from contextlib import closing
@@ -36,6 +37,10 @@ class OutOfCoverageError(Exception):
                 f"[{lo}, {hi}] ({epoch_to_iso(lo)} .. {epoch_to_iso(hi)})"
             )
         super().__init__(msg)
+
+
+class DriftRangeError(ValueError):
+    """累计漂移积分查询参数非法或越界。"""
 
 
 # ---------- 观测 ----------
@@ -342,3 +347,71 @@ def _endpoint_dict(conn: sqlite3.Connection, obs: sqlite3.Row) -> dict:
         "bias": obs["bias"],
         "outliers": [r["value"] for r in outliers],
     }
+
+
+# ---------- 累计漂移积分 ----------
+
+def drift_integral(start: float, end: float) -> dict:
+    """在观测覆盖范围内对当前分段线性 bias 做精确解析积分。
+
+    查询窗口 [start, end] 与各插值区间求交（边界可落在区间内部），逐段用
+    梯形公式求有号面积；段内过零时按解析交点拆分绝对值面积，不做采样。
+    汇总值由逐段贡献累加（math.fsum），保证与 contributions 之和一致。
+    """
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise DriftRangeError("'from' and 'to' must be finite timestamps")
+    if start >= end:
+        raise DriftRangeError(f"'from' ({start}) must be strictly less than 'to' ({end})")
+
+    with closing(connect()) as conn:
+        bounds = conn.execute("SELECT MIN(ts) AS lo, MAX(ts) AS hi FROM observations").fetchone()
+        lo, hi = bounds["lo"], bounds["hi"]
+        if lo is None:
+            raise DriftRangeError("no observations yet; drift coverage is empty")
+        if start < lo or end > hi:
+            raise DriftRangeError(
+                f"query window [{start}, {end}] is outside drift coverage "
+                f"[{lo}, {hi}] ({epoch_to_iso(lo)} .. {epoch_to_iso(hi)})"
+            )
+
+        rows = conn.execute(
+            "SELECT * FROM intervals WHERE t_start < ? AND t_end > ? ORDER BY t_start",
+            (end, start),
+        ).fetchall()
+        contributions: list[dict] = []
+        for row in rows:
+            seg_start = max(start, row["t_start"])
+            seg_end = min(end, row["t_end"])
+            if seg_start >= seg_end:
+                continue
+            bias_start = calibration.interpolate(
+                seg_start, row["t_start"], row["bias_start"], row["t_end"], row["bias_end"]
+            )
+            bias_end = calibration.interpolate(
+                seg_end, row["t_start"], row["bias_start"], row["t_end"], row["bias_end"]
+            )
+            signed, absolute, crossing = calibration.integrate_segment(
+                seg_start, seg_end, bias_start, bias_end
+            )
+            contributions.append({
+                "t_start": seg_start,
+                "t_end": seg_end,
+                "start_iso": epoch_to_iso(seg_start),
+                "end_iso": epoch_to_iso(seg_end),
+                "bias_start": bias_start,
+                "bias_end": bias_end,
+                "signed_bias_seconds": signed,
+                "absolute_bias_seconds": absolute,
+                "zero_crossing": crossing,
+                "zero_crossing_iso": epoch_to_iso(crossing) if crossing is not None else None,
+            })
+
+        return {
+            "start": start,
+            "end": end,
+            "start_iso": epoch_to_iso(start),
+            "end_iso": epoch_to_iso(end),
+            "signed_bias_seconds": math.fsum(c["signed_bias_seconds"] for c in contributions),
+            "absolute_bias_seconds": math.fsum(c["absolute_bias_seconds"] for c in contributions),
+            "contributions": contributions,
+        }

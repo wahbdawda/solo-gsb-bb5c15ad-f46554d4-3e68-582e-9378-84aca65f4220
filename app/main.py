@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from . import service
 from .calibration import CalibrationError
@@ -11,13 +12,16 @@ from .db import init_db
 from .models import (
     CorrectionIn,
     CorrectionOut,
+    DriftIntegralOut,
     IntervalOut,
     ObservationIn,
     ObservationOut,
     ObservationReviseIn,
     RevisionOut,
+    Timestamp,
 )
 from .service import (
+    DriftRangeError,
     DuplicateTimestampError,
     ObservationNotFoundError,
     OutOfCoverageError,
@@ -115,4 +119,21 @@ def post_correction(payload: CorrectionIn) -> dict:
     try:
         return service.correct(ts=payload.timestamp, reading=payload.reading)
     except OutOfCoverageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/drift-integral", response_model=DriftIntegralOut)
+def get_drift_integral(
+    start: Annotated[Timestamp, Query(alias="from", description="积分起点：Unix 秒或 ISO 8601")],
+    end: Annotated[Timestamp, Query(alias="to", description="积分终点：Unix 秒或 ISO 8601")],
+) -> dict:
+    """对当前分段线性 bias 在 [from, to] 上做精确解析积分。
+
+    查询边界可落在插值区间内部；from 必须严格小于 to，任一边界超出
+    [最早观测, 最晚观测] 返回 400。段内 bias 穿越 0 时按解析交点拆分
+    绝对值面积（不做固定步长采样）。
+    """
+    try:
+        return service.drift_integral(start=start, end=end)
+    except DriftRangeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

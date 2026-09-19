@@ -41,3 +41,27 @@ def interpolate(t: float, t0: float, b0: float, t1: float, b1: float) -> float:
     if t1 == t0:
         return b0
     return b0 + (b1 - b0) * (t - t0) / (t1 - t0)
+
+
+def integrate_segment(
+    a: float, b: float, bias_a: float, bias_b: float
+) -> tuple[float, float, float | None]:
+    """对线性偏差在子区间 [a, b]（端点偏差 bias_a、bias_b）上做精确解析积分。
+
+    返回 (signed_area, absolute_area, zero_crossing)：
+    - 有号面积用梯形公式 (bias_a + bias_b) * (b - a) / 2；
+    - 两端异号时线性段内恰有一次过零，按解析交点拆成两个三角形求
+      |bias| 面积，禁止固定步长采样；zero_crossing 给出该交点时点；
+    - 同号（含端点恰为 0）时不做段内拆分，交点为 None。
+    """
+    duration = b - a
+    signed = (bias_a + bias_b) * duration / 2.0
+    if bias_a * bias_b < 0.0:
+        # bias(a + f*duration) = bias_a + f*(bias_b - bias_a) = 0  →  f = bias_a/(bias_a-bias_b)
+        root = a + duration * bias_a / (bias_a - bias_b)
+        absolute = (
+            abs(bias_a) * (root - a) / 2.0
+            + abs(bias_b) * (b - root) / 2.0
+        )
+        return signed, absolute, root
+    return signed, abs(signed), None
